@@ -1,0 +1,78 @@
+services:
+  source:
+    build: .
+    command: uvicorn app.source:app --host 0.0.0.0 --port 8081
+    environment:
+      DATA_DIR: /data
+      SOURCE_DB: /data/source.db
+    ports:
+      - "8081:8081"
+    volumes:
+      - collector-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+
+  api:
+    build: .
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8080
+    environment:
+      DATA_DIR: /data
+      COLLECTOR_DB: /data/collector.db
+    ports:
+      - "8080:8080"
+    volumes:
+      - collector-data:/data
+    depends_on:
+      source:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+
+  worker1:
+    build: .
+    command: python -m app.worker
+    environment:
+      DATA_DIR: /data
+      COLLECTOR_DB: /data/collector.db
+      LEASE_SECONDS: "15"
+    volumes:
+      - collector-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 25s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/worker_healthcheck.sh"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+
+  worker2:
+    build: .
+    command: python -m app.worker
+    environment:
+      DATA_DIR: /data
+      COLLECTOR_DB: /data/collector.db
+      LEASE_SECONDS: "15"
+    volumes:
+      - collector-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 25s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/worker_healthcheck.sh"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+
+volumes:
+  collector-data:
