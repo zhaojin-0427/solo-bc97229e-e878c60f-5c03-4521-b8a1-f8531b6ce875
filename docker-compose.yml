@@ -21,6 +21,9 @@ services:
     environment:
       DATA_DIR: /data
       COLLECTOR_DB: /data/collector.db
+      # 演示/回归时序钩子开关：默认关闭（生产零影响）。
+      # 需要演示“提交中途取消/等锁取消”时改为 1，配合 scripts/cancel_demo.py。
+      COLLECTOR_TEST_HOOKS: "0"
     ports:
       - "8080:8080"
     volumes:
@@ -73,6 +76,16 @@ services:
       interval: 5s
       timeout: 4s
       retries: 10
+
+  # 一次性回归测试：独立临时库，不挂载共享卷，跑完即退出。
+  # 用法: docker compose run --rm tests
+  tests:
+    build: .
+    command: python -m pytest -q
+    environment:
+      COLLECTOR_TEST_HOOKS: "1"
+      TMPDIR: /tmp
+    # 不挂载 collector-data：conftest 强制使用 /tmp 下的独立库，与其他服务完全隔离
 
 volumes:
   collector-data:

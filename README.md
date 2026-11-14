@@ -3,7 +3,27 @@
 气象数据工程师批量补取站点逐日降水、送入干旱分析库的采集 API。FastAPI + SQLite，
 两个采集进程共享同一数据库，在不触发源站封禁的前提下并行采集。
 
-## 限速与可靠性规则（已全部实现）
+## 本次修复：补采提交的事务隔离与取消清理
+
+旧实现的所有写操作共用 API 进程内的**单个 aiosqlite 连接**，并发提交时一个请求
+遗留的未结束事务会让另一个请求撞上 “cannot start a transaction within a
+transaction”；任务行已写、明细未写时取消请求会留下半批数据，之后的提交持续 500，
+进度查询还把空任务报为完成。修复要点：
+
+| 问题 | 修复方式 |
+| --- | --- |
+| 并发提交事务嵌套、互相污染 | 每次写事务使用**独立连接**（`db.immediate_transaction`），整批 `jobs + items + source_states` 在一个 `BEGIN IMMEDIATE` 短事务内原子提交 |
+| 半批数据被读到、空任务报完成 | 所有查询走**独立只读连接**（`mode=ro`），只能看到完整已提交快照；`done` 增加 `total>0` 守卫，空任务绝不报完成 |
+| 提交前/写入中取消 | 取消安全事务：回滚本批并以不可取消的清理关闭连接，任务行与明细整体撤销；已完整提交的任务不受影响 |
+| 等待 SQLite 写锁时取消 | 取锁拆成「短 `busy_timeout` 尝试 + 让出事件循环」循环，取消在一个短周期（默认 100ms）内生效；等待中无打开事务，interrupt 后直接关连接，解锁后**无迟到写入、无遗留事务** |
+| 客户端断连服务端不感知 | 提交端点显式监听 ASGI `http.disconnect`，提交完成前断连即取消写入子任务 |
+| 清理干扰其他请求 / 需重启 | 每请求独立连接，取消只回滚并关闭自己的连接；其他请求与已提交数据完全不受影响，无需重启即可再提交 |
+| 写锁等待期间查询不可用 | 只读连接不参与写锁竞争，健康检查、进度、站日结果在写入/等锁期间始终可响应，且取自完整已提交状态 |
+
+原有的双进程采集、限速（同源在途 ≤ 2、请求间隔 ≥ 1 秒）、429 冷却与自动重试、
+租约/心跳/死亡回收、优雅退出接续规则全部保留，未做行为变更。
+
+## 限速与可靠性规则（保留）
 
 | 规则 | 实现方式 |
 | --- | --- |
@@ -25,14 +45,17 @@
 ```
 app/
   config.py   运行参数（环境变量可覆盖）
-  db.py       SQLite 连接与表结构（WAL）
-  api.py      采集 API（提交/进度/错误/结果/限速状态）
+  db.py       SQLite 连接、只读/写短连接、取消安全的 immediate_transaction
+  hooks.py    回归测试时序闸门（默认关闭，生产零影响）
+  api.py      采集 API（提交/进度/错误/结果/限速状态，断连感知）
   worker.py   采集进程（限速、冷却、租约、优雅退出、死亡回收）
   source.py   本地模拟气象源（可延迟、可发 429、记录请求时刻）
+tests/        回归测试（事务隔离/取消清理/并发查询/双进程采集）
 scripts/
   demo.sh               端到端演示
+  cancel_demo.py        取消清理语义自包含演示（独立临时库）
   worker_healthcheck.sh 容器健康检查
-docker-compose.yml      source + api + worker1 + worker2
+docker-compose.yml      source + api + worker1 + worker2 + tests
 ```
 
 ## 启动
@@ -41,9 +64,31 @@ docker-compose.yml      source + api + worker1 + worker2
 docker compose up --build
 ```
 
-- 采集 API 与交互文档：http://localhost:8080/docs
+- 采集 API 与交互文档（Swagger UI）：http://localhost:8080/docs
 - 模拟气象源与控制接口文档：http://localhost:8081/docs
 - 两个采集进程 `worker1`、`worker2` 共享卷 `collector-data` 中的 `collector.db`
+
+## 回归测试
+
+测试覆盖并发提交整批成功、查询读不到半批、提交前/等锁中取消的回滚、清理不干扰
+其他请求、写锁等待期间查询可响应、空任务不报完成，以及双进程下的限速/冷却/优雅
+退出接续。测试使用独立临时库，并通过 `app/hooks.py` 的命名闸门确定性控制
+「写入中 / 等锁 / 取消 / 并发查询」时序。
+
+```bash
+# 本地
+pip install -r requirements.txt
+python -m pytest -q
+
+# 容器（一次性服务，独立临时库，不挂载共享卷，跑完即退出）
+docker compose run --rm tests
+```
+
+取消清理语义的自包含演示（同样使用独立临时库，不影响共享卷）：
+
+```bash
+docker compose run --rm -e COLLECTOR_TEST_HOOKS=1 api python scripts/cancel_demo.py
+```
 
 ## 交互式演示（Swagger UI）
 
@@ -104,3 +149,7 @@ BASE=http://localhost:8080 SRC=http://localhost:8081 \
 | `WORKER_CONCURRENCY` | 5 | 单进程并发处理条目数 |
 | `HTTP_TIMEOUT_SECONDS` | 20 | 上游请求超时（超时记 `NETWORK_ERROR` 失败） |
 | `POLL_INTERVAL_SECONDS` | 0.25 | 空转轮询间隔 |
+| `BUSY_TIMEOUT_MS` | 10000 | 取锁总等待上限（毫秒），超时该请求失败且不遗留事务 |
+| `LOCK_ATTEMPT_TIMEOUT_MS` | 100 | 单次取锁尝试的 busy_timeout，决定等锁时取消的响应粒度 |
+| `LOCK_RETRY_INTERVAL_SECONDS` | 0.02 | 取锁短尝试之间的让出间隔 |
+| `COLLECTOR_TEST_HOOKS` | 0 | 置 1 启用回归测试时序闸门，默认关闭、生产零影响 |

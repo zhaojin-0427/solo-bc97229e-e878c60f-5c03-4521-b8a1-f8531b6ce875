@@ -142,7 +142,11 @@ class Worker:
         async with self.write_lock:
             try:
                 await self.conn.execute("BEGIN IMMEDIATE")
+            except asyncio.CancelledError:
+                # 等待写锁期间被取消（优雅退出）：事务未开启，放行取消信号
+                raise
             except aiosqlite.OperationalError:
+                # busy_timeout 内拿不到写锁：连接上没有打开的事务，下轮再试
                 return None
             try:
                 row = await db.fetchone(self.conn,
@@ -312,6 +316,8 @@ class Worker:
         async with self.write_lock:
             try:
                 await self.conn.execute("BEGIN IMMEDIATE")
+            except asyncio.CancelledError:
+                raise
             except aiosqlite.OperationalError:
                 # 拿不到写锁就下一轮重试，项保持 running 由租约/退出逻辑兜底
                 return
@@ -363,6 +369,8 @@ class Worker:
         async with self.write_lock:
             try:
                 await self.conn.execute("BEGIN IMMEDIATE")
+            except asyncio.CancelledError:
+                raise
             except aiosqlite.OperationalError:
                 return
             try:
@@ -393,6 +401,8 @@ class Worker:
         async with self.write_lock:
             try:
                 await self.conn.execute("BEGIN IMMEDIATE")
+            except asyncio.CancelledError:
+                raise
             except aiosqlite.OperationalError:
                 return
             try:
@@ -426,6 +436,8 @@ class Worker:
         async with self.write_lock:
             try:
                 await self.conn.execute("BEGIN IMMEDIATE")
+            except asyncio.CancelledError:
+                raise
             except aiosqlite.OperationalError:
                 return
             try:
@@ -490,6 +502,8 @@ class Worker:
         async with self.write_lock:
             try:
                 await self.conn.execute("BEGIN IMMEDIATE")
+            except asyncio.CancelledError:
+                raise
             except aiosqlite.OperationalError:
                 return
             try:

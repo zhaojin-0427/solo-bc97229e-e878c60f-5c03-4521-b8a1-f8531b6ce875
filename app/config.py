@@ -20,3 +20,13 @@ LEASE_SECONDS = float(os.getenv("LEASE_SECONDS", "15"))
 # 优雅退出时等待在途请求的最长时间
 SHUTDOWN_GRACE_SECONDS = float(os.getenv("SHUTDOWN_GRACE_SECONDS", "20"))
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20"))
+# SQLite 写锁等待上限（毫秒）：等待期间查询照常响应，超时后该请求失败、不遗留事务
+BUSY_TIMEOUT_MS = int(os.getenv("BUSY_TIMEOUT_MS", "10000"))
+# 单次 BEGIN IMMEDIATE 取锁尝试的 busy_timeout（毫秒）：取锁被拆成短尝试循环，
+# 每次尝试之间把控制权交还事件循环，使等待写锁时的取消在该时长内生效，
+# 而不是干等完整的 BUSY_TIMEOUT_MS
+LOCK_ATTEMPT_TIMEOUT_MS = int(os.getenv("LOCK_ATTEMPT_TIMEOUT_MS", "100"))
+# 取锁短尝试之间的让出间隔（秒），取消信号在此处被及时投递
+LOCK_RETRY_INTERVAL_SECONDS = float(os.getenv("LOCK_RETRY_INTERVAL_SECONDS", "0.02"))
+# 测试时序钩子开关：默认关闭，关闭时所有钩子为空操作（生产零影响）
+TEST_HOOKS_ENABLED = os.getenv("COLLECTOR_TEST_HOOKS") == "1"
